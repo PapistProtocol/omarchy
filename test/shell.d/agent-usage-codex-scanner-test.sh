@@ -681,6 +681,10 @@ result=$(run_incremental --force)
 pass "Codex collector --force rereads the history"
 
 chmod 644 "$incremental_session" "$incremental_pi"
+# The --force run above could not read either file, so cache them again first,
+# or the append below is read from scratch whether or not the cache noticed it.
+expire_scan_cache
+run_incremental >/dev/null
 cat >>"$incremental_session" <<EOF
 {"timestamp":"$incremental_timestamp","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":30,"cached_input_tokens":10,"output_tokens":2}}}}
 EOF
@@ -728,3 +732,16 @@ file_cache=$(ls "$INCREMENTAL_HOME/.cache/omarchy/agent-usage/"codex-files-*.jso
 [[ $(jq --arg path "$zone_session" -r '.files[$path].days | keys[0]' "$file_cache") == "$(TZ=America/Los_Angeles date -d "$zone_timestamp" +%Y-%m-%d)" ]] ||
   fail "Codex collector keeps the old timezone's days after a timezone change" "$(cat "$file_cache")"
 pass "Codex collector re-reads per-file records after a timezone change"
+
+# A line that stops the read keeps the usage read before it, as it always has.
+broken_session="$INCREMENTAL_HOME/.codex/sessions/broken.jsonl"
+cat >"$broken_session" <<EOF
+{"timestamp":"$incremental_timestamp","type":"turn_context","payload":{"model":"gpt-broken"}}
+{"timestamp":"$incremental_timestamp","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":6,"output_tokens":0}}}}
+null
+EOF
+expire_scan_cache
+result=$(run_incremental)
+[[ $(jq -r '.modelUsage["gpt-broken"].inputTokens' <<<"$result") == "6" ]] ||
+  fail "Codex collector drops usage read before a line that stops the read" "$result"
+pass "Codex collector keeps usage read before a line that stops the read"

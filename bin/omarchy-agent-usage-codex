@@ -427,10 +427,9 @@ def read_native_codex_session(path, stat_result):
         day = local_day(entry.get("timestamp") or stat_result.st_mtime)
         record_usage(record, day, current_model, input_tokens, output_tokens, cache_read, cache_write)
   except Exception:
-    # A file that cannot be read contributes nothing, and caching that empty
-    # record would hide it until it changes, so hand back a record the cache
-    # refuses to keep.
-    return {"mtime": None, "size": None, "days": {}}
+    # Keep what was read before the failure, but caching a partial record would
+    # hide the rest until the file changes, so hand back one the cache refuses.
+    record["mtime"] = None
   return record
 
 
