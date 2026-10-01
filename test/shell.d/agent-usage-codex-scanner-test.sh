@@ -689,3 +689,42 @@ result=$(run_incremental)
 [[ $(jq -r '.todayTotalTokens' <<<"$result") == "52" ]] ||
   fail "Codex collector misses turns appended to a session it had cached" "$result"
 pass "Codex collector rereads a session file that grew"
+
+# rg exits 2 when it cannot search a file. That batch is counted but not
+# cached, or a passing failure would hide the file until it changes.
+real_rg=$(command -v rg)
+cat >"$INCREMENTAL_HOME/bin/rg" <<EOF
+#!/bin/bash
+[[ -e "$INCREMENTAL_HOME/rg-fails" ]] && exit 2
+exec "$real_rg" "\$@"
+EOF
+chmod +x "$INCREMENTAL_HOME/bin/rg"
+cat >"$INCREMENTAL_HOME/.pi/agent/sessions/second.jsonl" <<EOF
+{"type":"message","id":"m2","timestamp":"$incremental_timestamp","message":{"role":"assistant","provider":"openai-codex","model":"gpt-test","usage":{"input":7,"output":1}}}
+EOF
+touch "$INCREMENTAL_HOME/rg-fails"
+expire_scan_cache
+result=$(run_incremental)
+[[ $(jq -r '.todayTotalTokens' <<<"$result") == "52" ]] ||
+  fail "Codex collector counts a failed rg search as usage" "$result"
+rm "$INCREMENTAL_HOME/rg-fails"
+expire_scan_cache
+result=$(run_incremental)
+[[ $(jq -r '.todayTotalTokens' <<<"$result") == "60" ]] ||
+  fail "Codex collector caches a failed rg search as an empty session" "$result"
+pass "Codex collector searches a session file again after rg failed on it"
+
+# Records are bucketed by local day, so a new timezone has to re-read them.
+zone_timestamp="$(date -u +%Y-%m-%d)T02:00:00Z"
+zone_session="$INCREMENTAL_HOME/.codex/sessions/zone.jsonl"
+cat >"$zone_session" <<EOF
+{"timestamp":"$zone_timestamp","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":3,"output_tokens":1}}}}
+EOF
+expire_scan_cache
+TZ=UTC run_incremental >/dev/null
+expire_scan_cache
+TZ=America/Los_Angeles run_incremental >/dev/null
+file_cache=$(ls "$INCREMENTAL_HOME/.cache/omarchy/agent-usage/"codex-files-*.json | head -n 1)
+[[ $(jq --arg path "$zone_session" -r '.files[$path].days | keys[0]' "$file_cache") == "$(TZ=America/Los_Angeles date -d "$zone_timestamp" +%Y-%m-%d)" ]] ||
+  fail "Codex collector keeps the old timezone's days after a timezone change" "$(cat "$file_cache")"
+pass "Codex collector re-reads per-file records after a timezone change"

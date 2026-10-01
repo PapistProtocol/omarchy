@@ -210,6 +210,7 @@ def scan_pi_sessions(cached_files, scanned_files):
 
     pending = {key: new_file_record(stat_result) for key, stat_result in stale}
     seen_messages = set()
+    uncached = set()
     paths = list(pending)
     for start in range(0, len(paths), SEARCH_BATCH_SIZE):
       batch = paths[start:start + SEARCH_BATCH_SIZE]
@@ -274,9 +275,14 @@ def scan_pi_sessions(cached_files, scanned_files):
         proc.wait(timeout=1)
       except Exception:
         proc.kill()
+      # rg exits 2 when it failed to search a file, and names it only on stderr.
+      # Count the batch this run, but cache none of it, or a passing error is permanent.
+      if proc.returncode not in (0, 1):
+        uncached.update(batch)
 
     for key, record in pending.items():
-      scanned_files[key] = record
+      if key not in uncached:
+        scanned_files[key] = record
       merge_file_record(key, record)
 
 
@@ -448,6 +454,11 @@ def scan_cache_paths():
   return root / f"codex-scan-{digest}.json", root / f"codex-scan-{digest}.lock"
 
 
+# Records hold local days, so they are only true in the timezone that wrote them.
+def file_cache_zone():
+  return [os.environ.get("TZ"), list(time.tzname), time.timezone, time.altzone]
+
+
 def file_cache_path():
   return cache_root() / f"codex-files-{scan_cache_digest()}.json"
 
@@ -480,8 +491,8 @@ def read_file_cache():
   record cannot have grown a turn since: its totals can be replayed instead of
   read. That is what keeps a refresh off the gigabytes of history it already
   counted. Unlike the aggregate scan cache these records carry no "today" and
-  never expire on their own -- only the file they describe can invalidate one,
-  so midnight and the clock moving leave them true.
+  never expire on their own -- only the file they describe or a change of
+  timezone can invalidate one, so midnight and the clock moving leave them true.
   """
   if force_rescan:
     return {}
@@ -490,6 +501,8 @@ def read_file_cache():
   except Exception:
     return {}
   if not isinstance(payload, dict) or payload.get("schemaVersion") != FILE_CACHE_SCHEMA:
+    return {}
+  if payload.get("zone") != file_cache_zone():
     return {}
   files = payload.get("files")
   if not isinstance(files, dict):
@@ -502,7 +515,7 @@ def write_file_cache(files):
   # sessions that aged out of the 30-day window leave the cache instead of
   # growing it forever.
   try:
-    write_json(file_cache_path(), {"schemaVersion": FILE_CACHE_SCHEMA, "files": files})
+    write_json(file_cache_path(), {"schemaVersion": FILE_CACHE_SCHEMA, "zone": file_cache_zone(), "files": files})
   except Exception as exc:
     print(f"omarchy-agent-usage-codex: could not write file cache ({exc})", file=sys.stderr)
 
